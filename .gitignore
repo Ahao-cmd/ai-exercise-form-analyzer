@@ -222,3 +222,6 @@ videos/*.mp4
 videos/*.mov
 videos/*.avi
 videos/*.mkv
+
+# Generated test images
+first_frame.jpg
