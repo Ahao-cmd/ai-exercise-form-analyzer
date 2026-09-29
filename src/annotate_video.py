@@ -3,7 +3,7 @@ import math
 import mediapipe as mp
 import matplotlib.pyplot as plt
 import statistics
-
+import json
 
 def to_pixel(landmark, width, height):
     x = landmark.x * width
@@ -170,17 +170,6 @@ with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
                         "max_torso_lean": max(current_rep_torso_leans)
                     }
 
-                    # Cancel an incomplete repetition
-                    if rep_in_progress and not reached_bottom and knee_angle > 150:
-                        rep_in_progress = False
-                        rep_start_time = None
-
-                        current_rep_knee_angles = []
-                        current_rep_hip_angles = []
-                        current_rep_torso_leans = []
-
-                        stage = "standing"
-
                     rep_summaries.append(rep_summary)
 
                     print("Rep completed:", rep_count)
@@ -188,6 +177,16 @@ with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
                     rep_in_progress = False
                     reached_bottom = False
                     rep_start_time = None
+
+                # Cancel an incomplete repetition
+                elif not reached_bottom and knee_angle > 150:
+                    rep_in_progress = False
+                    rep_start_time = None
+                    stage = "standing"
+
+                    current_rep_knee_angles = []
+                    current_rep_hip_angles = []
+                    current_rep_torso_leans = []
 
 
             # Draw skeleton
@@ -304,8 +303,6 @@ if knee_angles:
 
 print("Total squat repetitions:", rep_count)
 
-print("\nPer-rep analysis:")
-
 
 print("\nPer-rep analysis:")
 
@@ -315,11 +312,13 @@ if rep_summaries:
     min_hips = [rep["min_hip_angle"] for rep in rep_summaries]
     max_torso_leans = [rep["max_torso_lean"] for rep in rep_summaries]
 
+    # Calculate averages
     avg_duration = statistics.mean(durations)
     avg_knee = statistics.mean(min_knees)
     avg_hip = statistics.mean(min_hips)
     avg_torso = statistics.mean(max_torso_leans)
 
+    # Calculate standard deviations
     if len(rep_summaries) >= 2:
         duration_std = statistics.stdev(durations)
         knee_std = statistics.stdev(min_knees)
@@ -331,57 +330,98 @@ if rep_summaries:
         hip_std = 0
         torso_std = 0
 
-duration_cv = (duration_std / avg_duration) * 100
-knee_cv = (knee_std / avg_knee) * 100
-hip_cv = (hip_std / avg_hip) * 100
-torso_cv = (torso_std / avg_torso) * 100
+    # Calculate coefficient of variation
+    duration_cv = (duration_std / avg_duration) * 100
+    knee_cv = (knee_std / avg_knee) * 100
+    hip_cv = (hip_std / avg_hip) * 100
+    torso_cv = (torso_std / avg_torso) * 100
 
-most_different_duration_rep = max(
-    rep_summaries,
-    key=lambda rep: abs(rep["duration"] - avg_duration)
-)
-
-most_different_knee_rep = max(
-    rep_summaries,
-    key=lambda rep: abs(rep["min_knee_angle"] - avg_knee)
-)
-
-print(
-    "\nMost different tempo:",
-    f"Rep {most_different_duration_rep['rep']}"
-)
-
-print(
-    "Most different depth:",
-    f"Rep {most_different_knee_rep['rep']}"
-)
-
-print("\nConsistency percentages:")
-print("Tempo CV:", round(duration_cv, 1), "%")
-print("Knee depth CV:", round(knee_cv, 1), "%")
-print("Hip angle CV:", round(hip_cv, 1), "%")
-print("Torso lean CV:", round(torso_cv, 1), "%")
-
-print("\nSet summary:")
-print("Average duration:", round(avg_duration, 2), "seconds")
-print("Average minimum knee angle:", round(avg_knee, 1), "degrees")
-print("Average minimum hip angle:", round(avg_hip, 1), "degrees")
-print("Average maximum torso lean:", round(avg_torso, 1), "degrees")
-
-print("\nConsistency:")
-print("Duration standard deviation:", round(duration_std, 2))
-print("Knee angle standard deviation:", round(knee_std, 2))
-print("Hip angle standard deviation:", round(hip_std, 2))
-print("Torso lean standard deviation:", round(torso_std, 2))
-
-for rep in rep_summaries:
-    print(
-        f"Rep {rep['rep']}: "
-        f"Duration = {rep['duration']:.2f}s, "
-        f"Min Knee = {rep['min_knee_angle']:.1f}°, "
-        f"Min Hip = {rep['min_hip_angle']:.1f}°, "
-        f"Max Torso Lean = {rep['max_torso_lean']:.1f}°"
+    # Find repetitions that differ most from the average
+    most_different_duration_rep = max(
+        rep_summaries,
+        key=lambda rep: abs(rep["duration"] - avg_duration)
     )
+
+    most_different_knee_rep = max(
+        rep_summaries,
+        key=lambda rep: abs(rep["min_knee_angle"] - avg_knee)
+    )
+
+    # Print per-rep results
+    for rep in rep_summaries:
+        print(
+            f"Rep {rep['rep']}: "
+            f"Duration = {rep['duration']:.2f}s, "
+            f"Min Knee = {rep['min_knee_angle']:.1f}°, "
+            f"Min Hip = {rep['min_hip_angle']:.1f}°, "
+            f"Max Torso Lean = {rep['max_torso_lean']:.1f}°"
+        )
+
+    # Print set summary
+    print("\nSet summary:")
+    print("Average duration:", round(avg_duration, 2), "seconds")
+    print("Average minimum knee angle:", round(avg_knee, 1), "degrees")
+    print("Average minimum hip angle:", round(avg_hip, 1), "degrees")
+    print("Average maximum torso lean:", round(avg_torso, 1), "degrees")
+
+    # Print consistency statistics
+    print("\nConsistency:")
+    print("Duration standard deviation:", round(duration_std, 2))
+    print("Knee angle standard deviation:", round(knee_std, 2))
+    print("Hip angle standard deviation:", round(hip_std, 2))
+    print("Torso lean standard deviation:", round(torso_std, 2))
+
+    print("\nConsistency percentages:")
+    print("Tempo CV:", round(duration_cv, 1), "%")
+    print("Knee depth CV:", round(knee_cv, 1), "%")
+    print("Hip angle CV:", round(hip_cv, 1), "%")
+    print("Torso lean CV:", round(torso_cv, 1), "%")
+
+    print(
+        "\nMost different tempo:",
+        f"Rep {most_different_duration_rep['rep']}"
+    )
+
+    print(
+        "Most different depth:",
+        f"Rep {most_different_knee_rep['rep']}"
+    )
+
+    # Create structured JSON report
+    analysis_report = {
+        "total_reps": rep_count,
+
+        "set_summary": {
+            "average_duration": round(avg_duration, 2),
+            "average_min_knee_angle": round(avg_knee, 1),
+            "average_min_hip_angle": round(avg_hip, 1),
+            "average_max_torso_lean": round(avg_torso, 1)
+        },
+
+        "consistency": {
+            "tempo_cv_percent": round(duration_cv, 1),
+            "knee_depth_cv_percent": round(knee_cv, 1),
+            "hip_angle_cv_percent": round(hip_cv, 1),
+            "torso_lean_cv_percent": round(torso_cv, 1)
+        },
+
+        "most_different_reps": {
+            "tempo": most_different_duration_rep["rep"],
+            "depth": most_different_knee_rep["rep"]
+        },
+
+        "repetitions": rep_summaries
+    }
+
+    # Save JSON report
+    with open("analysis_report.json", "w") as file:
+        json.dump(
+            analysis_report,
+            file,
+            indent=4
+        )
+
+    print("\nAnalysis report saved as analysis_report.json")
 
 else:
     print("No completed repetitions available for analysis.")
