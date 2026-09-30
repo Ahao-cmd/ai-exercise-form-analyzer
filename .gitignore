@@ -226,3 +226,7 @@ output_*.mp4
 
 # Generated test images
 first_frame.jpg
+
+# Generated analysis outputs
+outputs/*
+!outputs/.gitkeep

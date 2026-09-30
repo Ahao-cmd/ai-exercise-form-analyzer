@@ -4,6 +4,8 @@ import mediapipe as mp
 import matplotlib.pyplot as plt
 import statistics
 import json
+import csv
+import os
 
 def to_pixel(landmark, width, height):
     x = landmark.x * width
@@ -38,6 +40,30 @@ def calculate_torso_lean(shoulder, hip):
 video_path = "videos/test_squat.mov"
 model_path = "models/pose_landmarker_full.task"
 
+output_dir = "outputs"
+
+os.makedirs(output_dir, exist_ok=True)
+
+output_video_path = os.path.join(
+    output_dir,
+    "squat_analysis.mp4"
+)
+
+plot_path = os.path.join(
+    output_dir,
+    "knee_angle_plot.png"
+)
+
+json_report_path = os.path.join(
+    output_dir,
+    "analysis_report.json"
+)
+
+csv_report_path = os.path.join(
+    output_dir,
+    "rep_analysis.csv"
+)
+
 video = cv2.VideoCapture(video_path)
 
 fps = video.get(cv2.CAP_PROP_FPS)
@@ -50,7 +76,7 @@ output_height = 1920
 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
 output_video = cv2.VideoWriter(
-    "output_squat_analysis.mp4",
+    output_video_path,
     fourcc,
     fps,
     (output_width, output_height)
@@ -81,6 +107,9 @@ torso_leans = []
 frame_number = 0
 rep_count = 0
 stage = "standing"
+previous_knee_angle = None
+current_min_knee_angle = None
+bottom_time = None
 
 with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
 
@@ -132,12 +161,22 @@ with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
             current_time = frame_number / fps
 
 
+                        # Calculate knee angle change from the previous frame
+            angle_change = 0.0
+
+            if previous_knee_angle is not None:
+                angle_change = knee_angle - previous_knee_angle
+
+
             # Start a new repetition
             if not rep_in_progress and knee_angle < 150:
                 rep_in_progress = True
                 reached_bottom = False
                 rep_start_time = current_time
-                stage = "down"
+                stage = "descending"
+
+                current_min_knee_angle = knee_angle
+                bottom_time = current_time
 
                 current_rep_knee_angles = []
                 current_rep_hip_angles = []
@@ -150,21 +189,52 @@ with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
                 current_rep_hip_angles.append(hip_angle)
                 current_rep_torso_leans.append(torso_lean)
 
-                # Confirm that the squat reached the bottom
+                # Track the lowest knee angle and its time
+                if knee_angle < current_min_knee_angle:
+                    current_min_knee_angle = knee_angle
+                    bottom_time = current_time
+
+
+                # Confirm sufficient squat depth
                 if knee_angle < 100:
                     reached_bottom = True
 
-                # Complete the repetition after standing back up
+
+                # Determine movement stage
+                if not reached_bottom:
+                    if angle_change < -0.3:
+                        stage = "descending"
+
+                else:
+                    if angle_change > 0.3:
+                        stage = "ascending"
+
+                    elif abs(angle_change) <= 0.3 and knee_angle < 110:
+                        stage = "bottom"
+
+
+                # Complete the repetition
                 if reached_bottom and knee_angle > 150:
                     rep_count += 1
                     stage = "standing"
 
                     rep_end_time = current_time
+
                     rep_duration = rep_end_time - rep_start_time
+                    descent_duration = bottom_time - rep_start_time
+                    ascent_duration = rep_end_time - bottom_time
+
+                    if ascent_duration > 0:
+                        tempo_ratio = descent_duration / ascent_duration
+                    else:
+                        tempo_ratio = 0
 
                     rep_summary = {
                         "rep": rep_count,
                         "duration": rep_duration,
+                        "descent_duration": descent_duration,
+                        "ascent_duration": ascent_duration,
+                        "tempo_ratio": tempo_ratio,
                         "min_knee_angle": min(current_rep_knee_angles),
                         "min_hip_angle": min(current_rep_hip_angles),
                         "max_torso_lean": max(current_rep_torso_leans)
@@ -177,16 +247,25 @@ with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
                     rep_in_progress = False
                     reached_bottom = False
                     rep_start_time = None
+                    current_min_knee_angle = None
+                    bottom_time = None
+
 
                 # Cancel an incomplete repetition
                 elif not reached_bottom and knee_angle > 150:
                     rep_in_progress = False
                     rep_start_time = None
+                    current_min_knee_angle = None
+                    bottom_time = None
                     stage = "standing"
 
                     current_rep_knee_angles = []
                     current_rep_hip_angles = []
                     current_rep_torso_leans = []
+
+
+            # Save current angle for the next frame
+            previous_knee_angle = knee_angle
 
 
             # Draw skeleton
@@ -278,7 +357,7 @@ video.release()
 output_video.release()
 
 
-print("Annotated video saved as output_squat_analysis.mp4")
+print("Annotated video saved to:", output_video_path)
 print("Frames processed:", frame_number)
 print("Pose frames detected:", len(knee_angles))
 
@@ -296,10 +375,10 @@ if knee_angles:
 
     plt.grid(True)
 
-    plt.savefig("knee_angle_plot.png")
+    plt.savefig(plot_path)
     plt.close()
 
-    print("Knee angle plot saved.")
+    print("Knee angle plot saved to:", plot_path)
 
 print("Total squat repetitions:", rep_count)
 
@@ -312,7 +391,25 @@ if rep_summaries:
     min_hips = [rep["min_hip_angle"] for rep in rep_summaries]
     max_torso_leans = [rep["max_torso_lean"] for rep in rep_summaries]
 
+    descent_durations = [
+        rep["descent_duration"]
+        for rep in rep_summaries
+    ]
+
+    ascent_durations = [
+        rep["ascent_duration"]
+        for rep in rep_summaries
+    ]
+
+    tempo_ratios = [
+        rep["tempo_ratio"]
+        for rep in rep_summaries
+    ]
+
     # Calculate averages
+    avg_descent = statistics.mean(descent_durations)
+    avg_ascent = statistics.mean(ascent_durations)
+    avg_tempo_ratio = statistics.mean(tempo_ratios)
     avg_duration = statistics.mean(durations)
     avg_knee = statistics.mean(min_knees)
     avg_hip = statistics.mean(min_hips)
@@ -352,6 +449,9 @@ if rep_summaries:
         print(
             f"Rep {rep['rep']}: "
             f"Duration = {rep['duration']:.2f}s, "
+            f"Descent = {rep['descent_duration']:.2f}s, "
+            f"Ascent = {rep['ascent_duration']:.2f}s, "
+            f"Tempo Ratio = {rep['tempo_ratio']:.2f}:1, "
             f"Min Knee = {rep['min_knee_angle']:.1f}°, "
             f"Min Hip = {rep['min_hip_angle']:.1f}°, "
             f"Max Torso Lean = {rep['max_torso_lean']:.1f}°"
@@ -387,6 +487,24 @@ if rep_summaries:
         f"Rep {most_different_knee_rep['rep']}"
     )
 
+    print(
+        "Average descent duration:",
+        round(avg_descent, 2),
+        "seconds"
+    )
+
+    print(
+        "Average ascent duration:",
+        round(avg_ascent, 2),
+        "seconds"
+    )
+
+    print(
+        "Average tempo ratio:",
+        round(avg_tempo_ratio, 2),
+        ":1"
+    )
+
     # Create structured JSON report
     analysis_report = {
         "total_reps": rep_count,
@@ -395,7 +513,10 @@ if rep_summaries:
             "average_duration": round(avg_duration, 2),
             "average_min_knee_angle": round(avg_knee, 1),
             "average_min_hip_angle": round(avg_hip, 1),
-            "average_max_torso_lean": round(avg_torso, 1)
+            "average_max_torso_lean": round(avg_torso, 1),
+            "average_descent_duration": round(avg_descent, 2),
+            "average_ascent_duration": round(avg_ascent, 2),
+            "average_tempo_ratio": round(avg_tempo_ratio, 2),
         },
 
         "consistency": {
@@ -414,14 +535,45 @@ if rep_summaries:
     }
 
     # Save JSON report
-    with open("analysis_report.json", "w") as file:
+    with open(json_report_path, "w") as file:
         json.dump(
             analysis_report,
             file,
             indent=4
         )
 
-    print("\nAnalysis report saved as analysis_report.json")
+    print("\nAnalysis report saved to:", json_report_path)
+    with open(csv_report_path, "w", newline="") as csv_file:
+        fieldnames = [
+            "rep",
+            "duration",
+            "descent_duration",
+            "ascent_duration",
+            "tempo_ratio",
+            "min_knee_angle",
+            "min_hip_angle",
+            "max_torso_lean"
+        ]
 
+        writer = csv.DictWriter(
+            csv_file,
+            fieldnames=fieldnames
+        )
+
+        writer.writeheader()
+
+        for rep in rep_summaries:
+            writer.writerow({
+                "rep": rep["rep"],
+                "duration": round(rep["duration"], 2),
+                "descent_duration": round(rep["descent_duration"], 2),
+                "ascent_duration": round(rep["ascent_duration"], 2),
+                "tempo_ratio": round(rep["tempo_ratio"], 2),
+                "min_knee_angle": round(rep["min_knee_angle"], 1),
+                "min_hip_angle": round(rep["min_hip_angle"], 1),
+                "max_torso_lean": round(rep["max_torso_lean"], 1)
+            })
+
+    print("CSV report saved to:", csv_report_path)
 else:
     print("No completed repetitions available for analysis.")
