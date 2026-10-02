@@ -6,6 +6,8 @@ import statistics
 import json
 import csv
 import os
+import argparse
+from pathlib import Path
 
 def to_pixel(landmark, width, height):
     x = landmark.x * width
@@ -37,10 +39,32 @@ def calculate_torso_lean(shoulder, hip):
 
     return angle
 
-video_path = "videos/test_squat.mov"
-model_path = "models/pose_landmarker_full.task"
+# Command-line arguments
+parser = argparse.ArgumentParser(
+    description="AI Exercise Form Analyzer"
+)
 
-output_dir = "outputs"
+parser.add_argument(
+    "--video",
+    type=str,
+    default="videos/test_squat.mov",
+    help="Path to the input exercise video"
+)
+
+args = parser.parse_args()
+
+video_path = args.video
+model_path = "models/pose_landmarker_full.task"
+# Minimum required landmark visibility
+MIN_VISIBILITY = 0.5
+
+# Create a separate output folder for each video
+video_name = Path(video_path).stem
+
+output_dir = os.path.join(
+    "outputs",
+    video_name
+)
 
 os.makedirs(output_dir, exist_ok=True)
 
@@ -65,6 +89,10 @@ csv_report_path = os.path.join(
 )
 
 video = cv2.VideoCapture(video_path)
+if not video.isOpened():
+    raise FileNotFoundError(
+        f"Cannot open input video: {video_path}"
+    )
 
 fps = video.get(cv2.CAP_PROP_FPS)
 width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -107,9 +135,13 @@ torso_leans = []
 frame_number = 0
 rep_count = 0
 stage = "standing"
+low_visibility_frames = 0
+missing_pose_frames = 0
 previous_knee_angle = None
 current_min_knee_angle = None
 bottom_time = None
+# Automatically selected body side
+selected_side = None
 
 with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
 
@@ -136,10 +168,115 @@ with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
         if result.pose_landmarks:
             landmarks = result.pose_landmarks[0]
 
-            shoulder = to_pixel(landmarks[11], width, height)
-            hip = to_pixel(landmarks[23], width, height)
-            knee = to_pixel(landmarks[25], width, height)
-            ankle = to_pixel(landmarks[27], width, height)
+            # Automatically select the more visible body side
+            if selected_side is None:
+
+                left_indices = [11, 23, 25, 27]
+                right_indices = [12, 24, 26, 28]
+
+                # Calculate average visibility
+                left_visibility = sum(
+                    landmarks[i].visibility
+                    for i in left_indices
+                ) / 4
+
+                right_visibility = sum(
+                    landmarks[i].visibility
+                    for i in right_indices
+                ) / 4
+
+                # Select the more visible side
+                if left_visibility >= right_visibility:
+                    selected_side = "left"
+                else:
+                    selected_side = "right"
+
+                print("\nAutomatic side selection:")
+                print("Left visibility:", round(left_visibility, 3))
+                print("Right visibility:", round(right_visibility, 3))
+                print("Selected side:", selected_side.upper())
+
+                # Warn when the first-frame comparison is ambiguous
+                if (
+                    abs(left_visibility - right_visibility) < 0.1
+                    or max(left_visibility, right_visibility) < 0.5
+                ):
+                    print("Warning: Side selection may be unreliable.")
+
+            # Use the selected side for the entire video
+            if selected_side == "left":
+                shoulder_id = 11
+                hip_id = 23
+                knee_id = 25
+                ankle_id = 27
+
+            else:
+                shoulder_id = 12
+                hip_id = 24
+                knee_id = 26
+                ankle_id = 28
+
+            # Check landmark visibility
+            required_indices = [
+                shoulder_id,
+                hip_id,
+                knee_id,
+                ankle_id
+            ]
+
+            visibilities = [
+                landmarks[i].visibility
+                for i in required_indices
+            ]
+
+            if min(visibilities) < MIN_VISIBILITY:
+                low_visibility_frames += 1
+
+                if rep_in_progress:
+                    print("Incomplete rep discarded: low visibility")
+
+                # Reset the current repetition
+                rep_in_progress = False
+                reached_bottom = False
+                rep_start_time = None
+                current_min_knee_angle = None
+                bottom_time = None
+                previous_knee_angle = None
+
+                current_rep_knee_angles = []
+                current_rep_hip_angles = []
+                current_rep_torso_leans = []
+
+                stage = "tracking_lost"
+
+                cv2.putText(
+                    frame,
+                    "Tracking lost: low visibility",
+                    (80, 950),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    2.0,
+                    (0, 0, 255),
+                    5
+                )
+
+                output_frame = cv2.resize(
+                    frame,
+                    (output_width, output_height)
+                )
+
+                output_video.write(output_frame)
+
+                frame_number += 1
+                continue
+
+            # Tracking recovered
+            if stage == "tracking_lost":
+                stage = "standing"
+
+            shoulder = to_pixel(landmarks[shoulder_id], width, height)
+            hip = to_pixel(landmarks[hip_id], width, height)
+            knee = to_pixel(landmarks[knee_id], width, height)
+            ankle = to_pixel(landmarks[ankle_id], width, height)
 
             knee_angle = calculate_angle(
                 hip,
@@ -342,6 +479,24 @@ with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
             torso_leans.append(torso_lean)
             times.append(current_time)
 
+        else:
+            missing_pose_frames += 1
+
+            if rep_in_progress:
+                print("Incomplete rep discarded: pose missing")
+
+            rep_in_progress = False
+            reached_bottom = False
+            rep_start_time = None
+            current_min_knee_angle = None
+            bottom_time = None
+            previous_knee_angle = None
+
+            current_rep_knee_angles = []
+            current_rep_hip_angles = []
+            current_rep_torso_leans = []
+
+            stage = "tracking_lost"
 
         # Always write the frame to the output video
         output_frame = cv2.resize(
@@ -381,7 +536,9 @@ if knee_angles:
     print("Knee angle plot saved to:", plot_path)
 
 print("Total squat repetitions:", rep_count)
-
+print("\nTracking validation:")
+print("Low visibility frames:", low_visibility_frames)
+print("Missing pose frames:", missing_pose_frames)
 
 print("\nPer-rep analysis:")
 
