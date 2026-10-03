@@ -142,6 +142,9 @@ current_min_knee_angle = None
 bottom_time = None
 # Automatically selected body side
 selected_side = None
+# Require a confirmed standing position before starting a rep
+ready_for_rep = False
+standing_frames = 0
 
 with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
 
@@ -242,6 +245,8 @@ with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
                 current_min_knee_angle = None
                 bottom_time = None
                 previous_knee_angle = None
+                ready_for_rep = False
+                standing_frames = 0
 
                 current_rep_knee_angles = []
                 current_rep_hip_angles = []
@@ -304,11 +309,22 @@ with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
             if previous_knee_angle is not None:
                 angle_change = knee_angle - previous_knee_angle
 
+            # Confirm standing position before allowing a new rep
+            if not rep_in_progress:
+                if knee_angle >= 155:
+                    standing_frames += 1
+
+                    if standing_frames >= 3:
+                        ready_for_rep = True
+                else:
+                    standing_frames = 0
 
             # Start a new repetition
-            if not rep_in_progress and knee_angle < 150:
+            if ready_for_rep and not rep_in_progress and knee_angle < 150:                
                 rep_in_progress = True
                 reached_bottom = False
+                ready_for_rep = False
+                standing_frames = 0
                 rep_start_time = current_time
                 stage = "descending"
 
@@ -514,7 +530,8 @@ output_video.release()
 
 print("Annotated video saved to:", output_video_path)
 print("Frames processed:", frame_number)
-print("Pose frames detected:", len(knee_angles))
+print("Valid analyzed frames:", len(knee_angles))
+print("Pose detected frames:", frame_number - missing_pose_frames)
 
 if knee_angles:
     print("Maximum knee angle:", round(max(knee_angles), 2))
