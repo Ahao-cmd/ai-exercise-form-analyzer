@@ -57,6 +57,8 @@ video_path = args.video
 model_path = "models/pose_landmarker_full.task"
 # Minimum required landmark visibility
 MIN_VISIBILITY = 0.5
+# Landmark position jump detection
+ANKLE_JUMP_THRESHOLD = 0.18
 
 # Create a separate output folder for each video
 video_name = Path(video_path).stem
@@ -135,6 +137,14 @@ torso_leans = []
 frame_number = 0
 rep_count = 0
 stage = "standing"
+# Previous frame ankle information
+previous_ankle_point = None
+previous_lower_leg_length = None
+
+# Number of suspicious ankle jumps
+ankle_jump_frames = 0
+# Store ankle jump measurements for evaluation
+ankle_jump_records = []
 low_visibility_frames = 0
 missing_pose_frames = 0
 previous_knee_angle = None
@@ -234,6 +244,28 @@ with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
 
             if min(visibilities) < MIN_VISIBILITY:
                 low_visibility_frames += 1
+                                # Identify which landmarks have low visibility
+                joint_names = [
+                    "Shoulder",
+                    "Hip",
+                    "Knee",
+                    "Ankle"
+                ]
+
+                low_joints = []
+
+                for name, visibility in zip(joint_names, visibilities):
+                    if visibility < MIN_VISIBILITY:
+                        low_joints.append(
+                            f"{name} = {visibility:.2f}"
+                        )
+
+                print(
+                    f"\nTracking lost at {frame_number / fps:.2f}s"
+                )
+
+                print("Selected side:", selected_side.upper())
+                print("Low visibility joints:", ", ".join(low_joints))
 
                 if rep_in_progress:
                     print("Incomplete rep discarded: low visibility")
@@ -245,6 +277,8 @@ with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
                 current_min_knee_angle = None
                 bottom_time = None
                 previous_knee_angle = None
+                previous_ankle_point = None
+                previous_lower_leg_length = None
                 ready_for_rep = False
                 standing_frames = 0
 
@@ -282,6 +316,64 @@ with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
             hip = to_pixel(landmarks[hip_id], width, height)
             knee = to_pixel(landmarks[knee_id], width, height)
             ankle = to_pixel(landmarks[ankle_id], width, height)
+
+            # Calculate current lower-leg length
+            current_lower_leg_length = math.dist(
+                knee,
+                ankle
+            )
+
+            # Detect suspicious ankle position jumps
+            if (
+                previous_ankle_point is not None
+                and previous_lower_leg_length is not None
+            ):
+
+                # Distance moved by ankle between two frames
+                ankle_movement = math.dist(
+                    ankle,
+                    previous_ankle_point
+                )
+
+                # Normalize by previous lower-leg length
+                ankle_jump_ratio = ankle_movement / max(
+                    previous_lower_leg_length,
+                    1.0
+                )
+                ankle_jump_records.append({
+                    "time": frame_number / fps,
+                    "ratio": ankle_jump_ratio,
+                    "visibility": landmarks[ankle_id].visibility
+                })
+
+                # Check whether movement exceeds the threshold
+                if ankle_jump_ratio > ANKLE_JUMP_THRESHOLD:
+
+                    ankle_jump_frames += 1
+
+                    print(
+                        f"\nWarning: Suspicious ankle jump "
+                        f"at {frame_number / fps:.2f}s"
+                    )
+
+                    print(
+                        "Selected side:",
+                        selected_side.upper()
+                    )
+
+                    print(
+                        "Ankle jump ratio:",
+                        round(ankle_jump_ratio, 3)
+                    )
+
+                    print(
+                        "Ankle visibility:",
+                        round(landmarks[ankle_id].visibility, 3)
+                    )
+
+            # Save current ankle information for the next frame
+            previous_ankle_point = ankle
+            previous_lower_leg_length = current_lower_leg_length
 
             knee_angle = calculate_angle(
                 hip,
@@ -507,7 +599,8 @@ with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
             current_min_knee_angle = None
             bottom_time = None
             previous_knee_angle = None
-
+            previous_ankle_point = None
+            previous_lower_leg_length = None
             current_rep_knee_angles = []
             current_rep_hip_angles = []
             current_rep_torso_leans = []
@@ -556,6 +649,25 @@ print("Total squat repetitions:", rep_count)
 print("\nTracking validation:")
 print("Low visibility frames:", low_visibility_frames)
 print("Missing pose frames:", missing_pose_frames)
+print("Suspicious ankle jump frames:", ankle_jump_frames)
+
+# Display the five largest observed ankle jumps
+if ankle_jump_records:
+
+    top_jumps = sorted(
+        ankle_jump_records,
+        key=lambda item: item["ratio"],
+        reverse=True
+    )[:5]
+
+    print("\nTop 5 ankle position changes:")
+
+    for jump in top_jumps:
+        print(
+            f"Time = {jump['time']:.2f}s, "
+            f"Jump Ratio = {jump['ratio']:.3f}, "
+            f"Visibility = {jump['visibility']:.3f}"
+        )
 
 print("\nPer-rep analysis:")
 
