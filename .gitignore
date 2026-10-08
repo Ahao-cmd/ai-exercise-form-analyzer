@@ -230,3 +230,9 @@ first_frame.jpg
 # Generated analysis outputs
 outputs/*
 !outputs/.gitkeep
+
+# macOS
+.DS_Store
+
+# Local test videos
+videos/
